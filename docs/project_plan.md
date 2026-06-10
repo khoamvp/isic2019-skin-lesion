@@ -252,19 +252,19 @@ dvc-gdrive==2.20.0
 **4.5 — Checklist setup:**
 
 ```
-[ ] 1.  Tạo cấu trúc thư mục
-[ ] 2.  Tạo .gitignore
-[ ] 3.  git init + tạo repo GitHub + git push
-[ ] 4.  Tạo venv, activate, pip install requirements.txt
-[ ] 5.  git lfs install + git lfs track "*.pth"
-[ ] 6.  dvc init
-[ ] 7.  dvc remote add Google Drive
-[ ] 8.  dvc add data/raw/ + dvc push
-[ ] 9.  git add .dvc + commit + push
-[ ] 10. Tạo tập sample 50 ảnh (6-7 ảnh/lớp) + CSV tương ứng
+[x] 1.  Tạo cấu trúc thư mục
+[x] 2.  Tạo .gitignore
+[x] 3.  git init + tạo repo GitHub + git push
+[x] 4.  Tạo venv, activate, pip install requirements.txt
+[x] 5.  git lfs install + git lfs track "*.pth"
+[x] 6.  dvc init
+[x] 7.  dvc remote add Google Drive
+[x] 8.  dvc add data/raw/ + dvc push
+[x] 9.  git add .dvc + commit + push
+[x] 10. Tạo tập sample 50 ảnh (6-7 ảnh/lớp) + CSV tương ứng
 [ ] 11. Tạo project trên W&B, lưu API key vào .env
 [ ] 12. Tạo Kaggle notebook, clone repo, mount Drive
-[ ] 13. Tạo thư mục docs/, lưu project_plan.md
+[x] 13. Tạo thư mục docs/, lưu project_plan.md
 ```
 
 > Không được chuyển sang Phần 5 nếu chưa tick xong mục 1→10.
