@@ -1,0 +1,23 @@
+# Data and Models (Managed by DVC / Git LFS)
+data/
+models/
+*.pth
+*.pt
+*.pkl
+
+# Environments
+venv/
+.env
+
+# Python / IDEs
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.vscode/
+.idea/
+
+# Experiments & OS
+wandb/
+Thumbs.db
+ehthumbs.db
+Desktop.ini 

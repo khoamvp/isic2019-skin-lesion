@@ -1,0 +1,15 @@
+torch==2.4.1
+torchvision==0.19.1
+albumentations==1.4.11
+streamlit==1.38.0
+scikit-learn==1.5.2
+pandas==2.2.2
+numpy==1.26.4
+opencv-python==4.10.0.84
+grad-cam==1.5.2
+shap==0.46.0
+wandb==0.18.0
+python-dotenv==1.0.1
+joblib==1.4.2
+dvc==3.55.0
+dvc-gdrive==3.0.1
