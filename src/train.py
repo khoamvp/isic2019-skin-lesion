@@ -24,10 +24,15 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import f1_score, roc_auc_score, recall_score
 
 import wandb
+
+
 from dotenv import load_dotenv
+load_dotenv()
+WANDB_API_KEY = os.getenv("WANDB_API_KEY")
+wandb.login(key=WANDB_API_KEY)
+from src.dataset import ISICDataset, TRAIN_TRANSFORM, VAL_TRANSFORM, make_dataloader
 
 from src.model import BaselineModel
-from src.dataset import ISICDataset, TRAIN_TRANSFORM, VAL_TRANSFORM, make_dataloader
 
 # =====================================================
 # CONFIG
@@ -260,6 +265,13 @@ def main():
     )
     scheduler = CosineAnnealingLR(optimizer, T_max=CONFIG["epochs"])
 
+    wandb_mode = os.getenv("WANDB_MODE", "online")
+    if wandb_mode != "disabled":
+        api_key = os.getenv("WANDB_API_KEY")
+        if api_key:
+            wandb.login(key=api_key)
+        else:
+            print("⚠️ Cảnh báo: Không tìm thấy WANDB_API_KEY trong file .env!")
     # --- W&B init ---
     wandb.init(
         project="isic2019-skin-lesion",
