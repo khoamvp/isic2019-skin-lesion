@@ -1,151 +1,131 @@
 import os
-import pandas as pd
-import numpy as np
 import joblib
-from sklearn.preprocessing import StandardScaler
+import numpy as np
+import pandas as pd
+from pathlib import Path
 from sklearn.model_selection import StratifiedGroupKFold
 
-def process_and_split_real_data(
-    meta_csv="data/raw/ISIC_2019_Training_Metadata.csv",
-    gt_csv="data/raw/ISIC_2019_Training_GroundTruth.csv",
-    image_dir="data/raw/train",
-    output_dir="data/processed",
-    models_dir="models"
-):
-    """
-    Pipeline tiền xử lý dữ liệu thực tế ISIC 2019:
-    1. Đồng bộ hóa bất đồng nhất tên file ảnh trên đĩa (_downsampled).
-    2. Gộp Metadata lâm sàng với nhãn Ground Truth.
-    3. Xử lý dữ liệu khuyết thiếu (NaN) chuẩn y khoa.
-    4. Chuẩn hóa thang đo biến liên tục (Age).
-    5. Mã hóa One-Hot biến định danh (Sex, Anatom Site).
-    6. Chia Fold bằng StratifiedGroupKFold để chống rò rỉ dữ liệu bệnh nhân.
-    """
-    # Tạo các thư mục đầu ra nếu chưa tồn tại
-    os.makedirs(output_dir, exist_ok=True)
-    os.makedirs(models_dir, exist_ok=True)
-    
-    print("--- Đang khởi động Data Pipeline với dữ liệu thực tế ISIC 2019 ---")
-    
-    # Kiểm tra sự tồn tại của file CSV gốc
-    if not os.path.exists(meta_csv) or not os.path.exists(gt_csv):
-        print(f"Lỗi: Không tìm thấy các file CSV gốc tại '{meta_csv}' hoặc '{gt_csv}'.")
-        return
-        
-    if not os.path.exists(image_dir) or len(os.listdir(image_dir)) == 0:
-        print(f"Lỗi: Thư mục ảnh mồi '{image_dir}' trống hoặc không tồn tại.")
-        return
+# Tự động phát hiện môi trường: Nếu có thư mục /kaggle -> LOCAL = False
+LOCAL = not os.path.exists("/kaggle")
 
-    # --- BƯỚC 1: XỬ LÝ BẤT ĐỒNG NHẤT TÊN ẢNH VÀ QUÉT Ổ ĐĨA ---
-    print("--> Bước 1: Đang quét thư mục ảnh để xử lý khớp tên file thực tế...")
-    image_files = os.listdir(image_dir)
-    id_to_filename = {}
-    for filename in image_files:
-        if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+LABEL_COLS = ["MEL", "NV", "BCC", "AK", "BKL", "DF", "VASC", "SCC"]
 
-            base_id = filename.split('.')[0]
-            id_to_filename[base_id] = filename
+MODELS_DIR = Path("models")
+MODELS_DIR.mkdir(exist_ok=True)
 
-    print(f"    Tìm thấy {len(id_to_filename)} ảnh mồi hợp lệ trên đĩa.")
+PROCESSED_DIR = Path("data/processed")
+PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
-    # --- BƯỚC 2: ĐỌC VÀ GỘP (MERGE) DỮ LIỆU ---
-    print("--> Bước 2: Đang đọc và gộp file Metadata với GroundTruth...")
-    df_meta = pd.read_csv(meta_csv)
-    df_gt = pd.read_csv(gt_csv)
-    df = pd.merge(df_meta, df_gt, on='image')
-    
-    # Ánh xạ tên file thực tế vào bảng dữ liệu dựa trên cột 'image'
-    df['actual_image_filename'] = df['image'].map(id_to_filename)
-    
-    # Lọc bỏ các dòng trong CSV mà trên đĩa local hiện tại chưa có ảnh mồi tương ứng
-    initial_count = len(df)
-    df = df.dropna(subset=['actual_image_filename']).reset_index(drop=True)
-    print(f"    Đã khớp thành công {len(df)} / {initial_count} dòng dữ liệu dựa trên số ảnh mồi đang có.")
+DATA_DIR = "data/raw" if LOCAL else "/kaggle/input/datasets/alifshahariar/isic-2019-dataset-full/isic-2019-dataset-full"
 
-    if len(df) == 0:
-        print(" Lỗi: Không có ảnh mồi nào khớp với ID trong file CSV. Hãy kiểm tra lại tên ảnh mồi của bạn!")
-        return
+# Hàm gộp dữ liệu metadata và nhãn (ground truth)
+def load_and_merge(meta_path: str, gt_path: str) -> pd.DataFrame:
+    df_meta = pd.read_csv(meta_path)
+    df_gt = pd.read_csv(gt_path)
+    # Gộp theo cột 'image'
+    df = df_meta.merge(df_gt, on="image", how="inner")
+    
+    # Lấy vị trí index có xác suất cao nhất làm label chính
+    df["label"] = df[LABEL_COLS].values.argmax(axis=1)
+    assert df["image"].nunique() == len(df), "Có image bị trùng sau khi merge."
+    print(f"[LOAD] rows={len(df):,} | classes={df['label'].nunique()}")
+    
+    return df
 
-    # Trích xuất nhãn số (0-7) từ 8 cột ma trận one-hot phục vụ Stratified split
-    classes = ['MEL', 'NV', 'BCC', 'AK', 'BKL', 'DF', 'VASC', 'SCC']
-    df['label'] = np.argmax(df[classes].values, axis=1)
+# Hàm xử lý các giá trị bị thiếu (NaN) - phần KHÔNG phụ thuộc train/test split
+def fill_missing(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    df["age_approx"] = pd.to_numeric(df["age_approx"], errors="coerce")
+    df["sex"] = df["sex"].fillna("unknown")
+    df["anatom_site_general"] = df["anatom_site_general"].fillna("unknown")
     
-    # --- BƯỚC 3: XỬ LÝ DỮ LIỆU KHUYẾT THIẾU (NaN) ---
-    print("--> Bước 3: Đang xử lý các ca khuyết thiếu dữ liệu (NaN)...")
-    median_age = df['age_approx'].median()
-    # Nếu chạy ít ảnh quá không tính được median, đặt mặc định là 50.0
-    if pd.isna(median_age): 
-        median_age = 50.0
-        
-    df['age_approx'] = df['age_approx'].fillna(median_age)
-    df['sex'] = df['sex'].fillna('unknown')
-    df['anatom_site_general'] = df['anatom_site_general'].fillna('unknown')
+    # SỬA LỖI: Điền giá trị thiếu bằng chính tên ảnh để không làm lệch thuật toán chia nhóm nhóm
+    df["lesion_id"] = df["lesion_id"].fillna(df["image"]).astype(str)
+
+    return df
+
+# Hàm fillna age_approx - PHẢI gọi SAU khi đã có train_df/test_df
+def fill_age(trainval_df: pd.DataFrame, test_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, float]:
+    trainval_df = trainval_df.copy()
+    test_df = test_df.copy()
+
+    median_age = trainval_df["age_approx"].median()
+
+    trainval_df["age_approx"] = trainval_df["age_approx"].fillna(median_age)
+    test_df["age_approx"] = test_df["age_approx"].fillna(median_age)
+
+    assert trainval_df["age_approx"].isnull().sum() == 0
+    assert test_df["age_approx"].isnull().sum() == 0
+
+    return trainval_df, test_df, median_age
+
+# Hàm biến đổi các cột chữ thành số (One-Hot Encoding)
+def encode_metadata(df: pd.DataFrame) -> tuple[pd.DataFrame, list]:
+    df = df.copy()
+    df = pd.get_dummies(df, columns=["sex", "anatom_site_general"], dtype=float)
     
-    # Đảm bảo tuyệt đối không còn NaN 
-    assert df['age_approx'].isnull().sum() == 0, "Lỗi logic: Vẫn còn NaN ở cột tuổi!"
-    assert df['sex'].isnull().sum() == 0, "Lỗi logic: Vẫn còn NaN ở cột giới tính!"
-    assert df['anatom_site_general'].isnull().sum() == 0, "Lỗi logic: Vẫn còn NaN ở cột vị trí tổn thương!"
+    # Lưu lại danh sách các cột feature mới được tạo ra
+    feature_cols = ["age_approx"] + [c for c in df.columns if c.startswith("sex_") or c.startswith("anatom_site_")]
+    print(f"[ENCODE] feature_dim={len(feature_cols)}")
     
-    # Lưu giá trị median tuổi làm cấu hình cố định cho App Streamlit sau này
-    joblib.dump(median_age, os.path.join(models_dir, "median_age.pkl"))
+    return df, feature_cols
+
+# Hàm chia tập dữ liệu thành các fold để huấn luyện (Cross Validation)
+def create_folds(df: pd.DataFrame, n_splits: int = 5, seed: int = 42) -> pd.DataFrame:
+    df = df.copy()
     
-    # --- BƯỚC 4: CHUẨN HÓA THANG ĐO BIẾN LIÊN TỤC (AGE) ---
-    print("--> Bước 4: Đang chuẩn hóa biến liên tục (Tuổi bệnh nhân)...")
-    scaler = StandardScaler()
-    # Fit và transform cột tuổi
-    if len(df) > 1:
-        df['age_scaled'] = scaler.fit_transform(df[['age_approx']])
-    else:
-        df['age_scaled'] = 0.0 # Phòng thủ nếu chỉ test duy nhất 1 ảnh
-    joblib.dump(scaler, os.path.join(models_dir, "scaler.pkl"))
+    # Group: Tránh rò rỉ dữ liệu (data leakage) giữa các ảnh của cùng 1 tổn thương da (lesion_id)
+    # Stratify: Giữ tỷ lệ các nhãn (label) cân bằng giữa các fold
+    sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+    df["fold"] = -1
+
+    for fold, (_, val_idx) in enumerate(sgkf.split(df, y=df["label"], groups=df["lesion_id"])):
+        df.loc[val_idx, "fold"] = fold
+
+    assert (df["fold"] >= 0).all()
+    print(f"[FOLD] {n_splits} folds created")
     
-    # --- BƯỚC 5: MÃ HÓA ONE-HOT BIẾN ĐỊNH DANH LÂM SÀNG ---
-    print("--> Bước 5: Đang mã hóa One-Hot Encoding cho dữ liệu chữ...")
-    expected_sex_cols = ['sex_female', 'sex_male', 'sex_unknown']
-    expected_site_cols = ['site_anterior torso', 'site_head/neck', 'site_lower extremity', 
-                          'site_palms/soles', 'site_posterior torso', 'site_unknown', 'site_upper extremity']
-    
-    df_sex_encoded = pd.get_dummies(df['sex'], prefix='sex', dtype=float)
-    df_site_encoded = pd.get_dummies(df['anatom_site_general'], prefix='site', dtype=float)
-    
-    # Ép cấu hình cột theo đúng thiết kế Spec để khi Inference trên App không bị lệch số chiều
-    df_sex_encoded = df_sex_encoded.reindex(columns=expected_sex_cols, fill_value=0.0)
-    df_site_encoded = df_site_encoded.reindex(columns=expected_site_cols, fill_value=0.0)
-    
-    meta_features = ['age_scaled'] + expected_sex_cols + expected_site_cols
-    joblib.dump(meta_features, os.path.join(models_dir, "feature_cols.pkl"))
-    
-    # Ghép các đặc trưng số hóa vào bảng DataFrame tổng
-    df = pd.concat([df, df_sex_encoded, df_site_encoded], axis=1)
-    
-    # --- BƯỚC 6: CHIA FOLD CHỐNG RÒ RỈ DỮ LIỆU BỆNH NHÂN ---
-    print("--> Bước 6: Đang thực hiện chia Fold bằng StratifiedGroupKFold...")
-    df['fold'] = -1
-    
-    # Nếu số lượng ảnh mồi quá ít (nhỏ hơn 5), gán tạm fold=0 thay vì chia nhóm để tránh crash
-    if len(df) >= 5 and df['lesion_id'].nunique() >= 5:
-        sgkf = StratifiedGroupKFold(n_splits=5)
-        for fold_idx, (train_idx, val_idx) in enumerate(sgkf.split(X=df, y=df['label'], groups=df['lesion_id'])):
-            df.loc[val_idx, 'fold'] = fold_idx
-        
-        # --- SANITY CHECK ĐỘ AN TOÀN DỮ LIỆU ---
-        print("---  Đang chạy Sanity Check kiểm tra lỗi hệ thống ---")
-        train_df = df[df['fold'] != 0]
-        test_df = df[df['fold'] == 0]
-        
-        # Kiểm tra xem có bệnh nhân nào xuất hiện ở cả 2 tập không
-        common_patients = set(train_df['lesion_id']).intersection(set(test_df['lesion_id']))
-        print(f"    Số lượng bệnh nhân bị trùng lặp giữa Train và Test: {len(common_patients)}")
-        assert len(common_patients) == 0, "CẢNH BÁO NGUY HIỂM: Rò rỉ dữ liệu bệnh nhân xuất hiện!"
-        print("    -> Kết quả check rò rỉ: [ĐẠT] Code chia fold chống leak hoàn hảo.")
-    else:
-        df['fold'] = 0
-        print("   Cảnh báo: Số lượng mẫu mồi quá ít, hệ thống tự động gán toàn bộ vào Fold 0 để test.")
-    
-    # Xuất file kết quả sạch ra thư mục processed
-    output_path = os.path.join(output_dir, "metadata_processed.csv")
-    df.to_csv(output_path, index=False)
-    print(f"\ [THÀNH CÔNG] Toàn bộ dữ liệu sạch đã được xuất bản tại: {output_path}")
+    return df
+
+# Hàm lưu các giá trị tham chiếu để tái sử dụng khi test/inference
+def save_artifacts(median_age: float, feature_cols: list):
+    joblib.dump(median_age, MODELS_DIR / "median_age.pkl")
+    joblib.dump(feature_cols, MODELS_DIR / "feature_cols.pkl")
+    print("[SAVE] median_age.pkl & feature_cols.pkl")
 
 if __name__ == "__main__":
-    process_and_split_real_data()
+    print(f"--- Đang khởi động Data Pipeline với môi trường: {'LOCAL' if LOCAL else 'KAGGLE'} ---")
+    
+    TRAIN_META = f"{DATA_DIR}/ISIC_2019_Training_Metadata.csv"
+    TRAIN_GT = f"{DATA_DIR}/ISIC_2019_Training_GroundTruth.csv"
+
+    # Pipeline xử lý dữ liệu chuẩn bị cho Model
+    df = load_and_merge(TRAIN_META, TRAIN_GT)
+    df = fill_missing(df)                          # đã sửa logic điền lesion_id
+    df, feature_cols = encode_metadata(df)         # one-hot sex/anatom; age vẫn raw
+    df = create_folds(df, n_splits=5, seed=42)     # chia fold an toàn, không còn lỗi mixed-type hay imbalanced
+
+    # Tách trainval/test để fillna age đúng thứ tự (chống leakage)
+    trainval_df = df[df["fold"] != 0].reset_index(drop=True)
+    test_df     = df[df["fold"] == 0].reset_index(drop=True)
+    trainval_df, test_df, median_age = fill_age(trainval_df, test_df)
+    df = pd.concat([trainval_df, test_df], ignore_index=True)
+
+    # Kiểm tra rò rỉ bệnh nhân giữa Fold 0 (làm tập Test mẫu) và các Fold còn lại (tập Train)
+    train_lesions = set(df[df["fold"] != 0]["lesion_id"])
+    test_lesions = set(df[df["fold"] == 0]["lesion_id"])
+    assert len(train_lesions.intersection(test_lesions)) == 0, "LỖI: Data Leakage! Bệnh nhân bị rò rỉ giữa train và test."
+    
+    # Bỏ cột lesion_id sau khi split xong (Không cần đưa vào DataLoader)
+    df = df.drop(columns=["lesion_id"])
+    
+    # Lưu lại DataFrame đã xử lý dưới dạng CSV
+    output_csv = PROCESSED_DIR / "metadata_processed.csv"
+    df.to_csv(output_csv, index=False)
+    print(f"[SAVE] {output_csv}")
+
+    # Lưu file .pkl
+    save_artifacts(median_age, feature_cols)
+    print(f"[THÀNH CÔNG] Toàn bộ dữ liệu sạch đã được xuất bản tại: {output_csv}")
+    print(f"[DONE] rows={len(df):,} | meta_dim={len(feature_cols)}")

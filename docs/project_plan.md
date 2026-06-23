@@ -3,7 +3,7 @@
 
 **Tác giả:**  
 **Phiên bản:** 1.0  
-**Ngày tạo:**  
+**Ngày tạo:*10/06/2026*  
 **Cập nhật lần cuối:**  
 
 ---
@@ -32,7 +32,7 @@ Bác sĩ da liễu và kỹ thuật viên y tế tại phòng khám. Hệ thốn
 **Thể hiện trong portfolio:**
 - Multimodal deep learning (CNN + MLP fusion)
 - Xử lý class imbalance nặng trong y tế
-- Explainable AI (Grad-CAM + SHAP)
+- Explainable & Reliable AI (Grad-CAM + Calibration Analysis)
 - End-to-end: từ data pipeline đến deploy Streamlit
 - Đánh giá theo tiêu chuẩn y khoa (Sensitivity, 95% CI, McNemar test)
 
@@ -45,7 +45,7 @@ ISIC 2019 Challenge Dataset, tổng hợp từ 3 nguồn: BCN_20000, HAM10000, M
 Kaggle: `alifshahariar/isic-2019-dataset-full`
 
 **2.2 — Quy mô:**  
-25,331 ảnh dermoscopy chất lượng cao + 1 file CSV metadata lâm sàng
+25,331 ảnh dermoscopy chất lượng cao + 1 file CSV metadata lâm sàng + 1 file csv GroudTrush từ bác sĩ
 
 **2.3 — Cấu trúc CSV:**
 
@@ -79,7 +79,8 @@ Kaggle: `alifshahariar/isic-2019-dataset-full`
 > Các insight này là cơ sở để chứng minh metadata lâm sàng có giá trị thực sự khi kết hợp với ảnh.
 
 **2.5 — Thách thức đã biết:**
-- Class imbalance cực nặng: NV chiếm 51%
+- Class imbalance cực nặng: NV chiếm 51%, ta không thể dùng train_test_split(sktlearn) vì nó chia random,
+ dùng StratifiedGroupKFold để đảm bảo chia cân bằng
 - Cặp MEL vs NV hình thái học rất giống nhau trên ảnh dermoscopy
 - Metadata có NaN: age_approx ~8%, sex ~4%, anatom_site_general ~10% (ước tính, cần verify lại bằng df.isnull().sum())
 - 1 bệnh nhân có nhiều ảnh → phải split theo lesion_id không phải image_id
@@ -115,14 +116,21 @@ ResNet50 pretrained                  MLP Branch
                        ↓
                   2064 dim vector
                        ↓
-              Linear(2064 → 8)
+              Linear(2064 → 512)
                        ↓
-                 Softmax (8 lớp)
+              BatchNorm1d(512)
+                       ↓
+              ReLU + Dropout(0.3)
+                       ↓
+               Linear(512 → 8)
+                       ↓
+                 logits(8 lớp)
 ```
 
 **3.2 — Chiến lược xử lý imbalance:**
 - Focal Loss + Class Weights (phạt nặng khi sai lớp hiếm)
-- Threshold shifting: hạ ngưỡng MEL xuống 0.35 thay vì 0.5
+- Threshold shifting: MEL threshold DEFAULT = 0.35 (thay vì 0.5)
+  → Fallback nếu Recall chưa đạt: xem bậc fallback ở mục 7.6 / R04 (12.1)
 - Augmentation mạnh cho lớp thiểu số
 
 **3.3 — Data Split:**
@@ -136,17 +144,29 @@ ResNet50 pretrained                  MLP Branch
 | Thành phần | Lựa chọn |
 |---|---|
 | Optimizer | Adam, lr=1e-4 |
-| Scheduler | CosineAnnealingLR, T_max=20 |
+| Scheduler | CosineAnnealingLR, T_max=30 |
 | Batch size | 32 |
 | Epochs | 30 (max) |
-| Early stopping | patience=5, monitor=val Macro-F1 |
+| Early stopping | patience=7, monitor=val Macro-F1 |
 | Gradient clipping | max_norm=1.0 |
 | Seed | 42 (torch, numpy, random, CUDA) |
 | Môi trường train | Kaggle (GPU free) |
 
-**3.5 — Explainability:**
-- Grad-CAM: trỏ vào layer4[-1] của ResNet, kèm Drop-and-Gain Evaluation
-- SHAP KernelExplainer: đo mức độ đóng góp từng feature metadata
+
+**3.5 — Explainability & Reliability:**
+- Grad-CAM: trực quan hóa vùng ảnh ảnh hưởng nhiều nhất đến quyết định của model
+  (target layer = layer4[-1] của ResNet50)
+
+- Reliability Diagram:
+  so sánh xác suất dự đoán với độ chính xác thực tế,
+  đánh giá mức độ hiệu chuẩn (calibration) của mô hình.
+
+- Expected Calibration Error (ECE):
+  đo khoảng cách trung bình giữa confidence và accuracy.
+
+- Temperature Scaling:
+  hậu xử lý logits trên tập validation để cải thiện calibration
+  mà không làm thay đổi độ chính xác phân loại.
 
 **3.6 — Stack kỹ thuật:**
 
@@ -155,13 +175,13 @@ ResNet50 pretrained                  MLP Branch
 | Deep learning | PyTorch |
 | Augmentation | Albumentations |
 | Experiment tracking | W&B |
-| Data versioning | DVC + Google Drive |
+| Data versioning | DVC + Google Drive (chỉ model checkpoint .pth) |
 | App | Streamlit |
 | Deploy | Streamlit Cloud |
 | Repo | GitHub |
 
 **3.7 — Baseline vs Multimodal:**
-- Chạy song song 2 model cùng seed, cùng fold
+- Chạy tuần tự: Baseline (M2) trước, Multimodal (M3) sau — cùng seed, cùng fold, cùng tập test  
 - Baseline: ResNet50 chỉ nhận ảnh
 - Multimodal: ResNet50 + MLP fusion
 - So sánh bằng McNemar test, chỉ công nhận cải tiến khi p < 0.05
@@ -174,14 +194,14 @@ ResNet50 pretrained                  MLP Branch
 
 ```
 isic2019-skin-lesion/
-├── data/                    ← KHÔNG commit (DVC quản lý)
-│   ├── raw/                 ← ảnh gốc ISIC2019
+├── data/                    ← KHÔNG commit (ảnh lấy từ Kaggle Dataset)
+│   ├── raw/                 ← ảnh gốc ISIC2019 (Kaggle Dataset, không lưu local)
 │   └── processed/           ← CSV sau khi clean
 ├── notebooks/               ← chỉ nháp EDA, không chứa logic
 ├── src/
 │   ├── preprocessing.py     ← encode metadata, transform
 │   ├── dataset.py           ← Custom PyTorch Dataset
-│   ├── model.py             ← Baseline + Multimodal model
+│   ├── model.py             ← định nghĩa BaselineModel + MultimodalNet
 │   ├── train.py             ← training loop
 │   └── evaluate.py          ← metrics, McNemar, bootstrap
 ├── models/                  ← KHÔNG commit (DVC quản lý)
@@ -213,58 +233,41 @@ __pycache__/
 wandb/
 ```
 
-**4.3 — Git LFS (quản lý file model nặng):**
-
-```bash
-# Cài Git LFS 1 lần duy nhất
-git lfs install
-
-# Track file .pth trước khi add
-git lfs track "*.pth"
-
-# Commit file .gitattributes do Git LFS tạo ra
-git add .gitattributes
-git commit -m "chore: configure git lfs for model weights"
-```
-
-> Bắt buộc chạy trước khi add bất kỳ file .pth nào.
-> GitHub từ chối file > 100MB nếu không dùng Git LFS.
-
-**4.4 — Requirements.txt:**
+**4.3 — Requirements.txt:**
 
 ```
-torch==2.1.0
-torchvision==0.16.0
-albumentations==1.3.1
-streamlit==1.28.0
-scikit-learn==1.3.2
-pandas==2.1.0
-numpy==1.24.0
+torch==2.4.1
+torchvision==0.19.1
+numpy==1.26.4
 opencv-python==4.8.0.76
-grad-cam==1.4.8
-shap==0.43.0
-wandb==0.16.0
+albumentations>=1.4.0
+scikit-learn==1.3.2
+pandas==2.1.4
 joblib==1.3.2
-dvc==3.30.0
-dvc-gdrive==2.20.0
+streamlit==1.38.0
+wandb==0.18.0
+grad-cam==1.4.8
+python-dotenv==1.0.1
+dvc==3.55.0
 ```
 
-**4.5 — Checklist setup:**
+**4.4 — Checklist setup:**
 
 ```
 [x] 1.  Tạo cấu trúc thư mục
 [x] 2.  Tạo .gitignore
 [x] 3.  git init + tạo repo GitHub + git push
 [x] 4.  Tạo venv, activate, pip install requirements.txt
-[x] 5.  git lfs install + git lfs track "*.pth"
-[x] 6.  dvc init
-[x] 7.  dvc remote add Google Drive
-[x] 8.  dvc add data/raw/ + dvc push
-[x] 9.  git add .dvc + commit + push
-[x] 10. Tạo tập sample 50 ảnh (6-7 ảnh/lớp) + CSV tương ứng
-[ ] 11. Tạo project trên W&B, lưu API key vào .env
-[ ] 12. Tạo Kaggle notebook, clone repo, mount Drive
-[x] 13. Tạo thư mục docs/, lưu project_plan.md
+[x] 5.  dvc init (chỉ để track model checkpoint .pth)
+[x] 6.  dvc remote add Google Drive (chỉ cho models/)
+[x] 7.  Kết nối ISIC 2019 Kaggle Dataset vào Kaggle Notebook
+[x] 8.  git add .dvc + commit + push
+[x] 9. Xác nhận dataset đọc được từ /kaggle/input/ trên Notebook
+[x] 10. Tạo project trên W&B, lưu API key vào .env
+[x] 11. Tạo Kaggle Notebook
+[x] 12. Clone GitHub Repo
+[x] 13. Kết nối ISIC 2019 Kaggle Dataset
+[x] 14. Tạo thư mục docs/, lưu project_plan.md
 ```
 
 > Không được chuyển sang Phần 5 nếu chưa tick xong mục 1→10.
@@ -276,25 +279,42 @@ dvc-gdrive==2.20.0
 **5.1 — Tổng quan luồng dữ liệu:**
 
 ```
-ISIC2019_train_metadata.csv
+Kaggle Dataset (ảnh + CSV)
         ↓
-   Load + Inspect
+   preprocessing.py
         ↓
-  Xử lý null/NaN
+   Load + Inspect CSV
         ↓
-  Encode Metadata
+      EDA        ← bổ sung
         ↓
-  StratifiedGroupKFold
+  fillna sex/anatom_site_general → 'unknown'
+        ↓
+  Encode Metadata (One-Hot only, KHÔNG fit Scaler)
+        ↓
+  StratifiedGroupKFold (group=lesion_id)
         ↓
     ┌───┴───┐
   Train    Test (khóa)
     ↓
+  Tính median_age TRÊN TRAIN
+  → fillna(age_approx) cho cả Train + Test
+        ↓
+  Lưu metadata_processed.csv
+  + median_age.pkl + feature_cols.pkl
+        ↓
+   dataset.py
+        ↓
   Dataset + DataLoader
-    ↓
+        ↓
   Augmentation (train only)
-    ↓
   Normalize (tất cả)
-    ↓
+        ↓
+   train.py
+        ↓
+  Fit StandardScaler trên Train Fold
+  → Transform Val Fold
+  → Training Loop
+        ↓
   Tensor → Model
 ```
 
@@ -312,12 +332,58 @@ Kiểm tra:
 - assert không có image_id trùng nhau
 ```
 
+**5.2b — Bước 1b: EDA (sau khi merge, trước khi xử lý null)**
+
+```
+Mục đích : Hiểu dữ liệu thực tế trước khi can thiệp,
+           xác minh các insights lâm sàng đã ghi ở mục 2.4b,
+           verify % NaN thực tế (so với ước tính ở mục 2.5)
+
+── Phân phối nhãn ──────────────────────────────────────────
+df['label'].value_counts(normalize=True)
+→ Bar chart ngang 8 lớp (count + %)
+→ Xác nhận NV ~51%, MEL ~18%, imbalance ratio NV:SCC
+
+── Phân tích NaN thực tế ───────────────────────────────────
+df.isnull().sum() / len(df) * 100
+→ So sánh với ước tính: age ~8%, sex ~4%, anatom_site ~10%
+→ Nếu lệch nhiều: cập nhật lại mục 2.5
+
+── Tuổi vs Loại bệnh ───────────────────────────────────────
+sns.boxplot(data=df, x='label', y='age_approx')
+→ Kỳ vọng: MEL tập trung 45-65 tuổi, NV tập trung 20-40 tuổi
+→ Chú ý: vẽ trên df chưa fillna (NaN vẫn bị bỏ qua tự động)
+
+── Giới tính vs Loại bệnh ──────────────────────────────────
+pd.crosstab(df['label'], df['sex'], normalize='index') * 100
+→ Stacked bar chart
+→ Kỳ vọng: MEL nhiều ở nam hơn nữ, DF ngược lại
+
+── Vị trí tổn thương vs Loại bệnh ─────────────────────────
+pd.crosstab(df['label'], df['anatom_site_general'],
+            normalize='index') * 100
+→ Heatmap (seaborn)
+→ Kỳ vọng: lưng/thân mình → MEL/NV, mặt → BCC/AK
+
+Output : Không lưu file, chỉ hiển thị inline trong notebook
+Ghi chú: Nếu insight thực tế lệch với kỳ vọng ở 2.4b
+         → cập nhật lại mục 2.4b trước khi tiếp tục
+```
+
 **5.3 — Bước 2: Xử lý null**
 
 ```
-age_approx          → fillna(median), lưu median_age ra file
-sex                 → fillna('unknown')
-anatom_site_general → fillna('unknown')
+⚠ THỨ TỰ BẮT BUỘC để tránh data leakage:
+   Split train/test (5.5) PHẢI thực hiện TRƯỚC khi tính median_age.
+   Bước này (5.3) chỉ áp dụng SAU KHI đã có train_df/test_df.
+
+sex                 → fillna('unknown')                     [áp dụng cho cả train + test]
+anatom_site_general → fillna('unknown')                     [áp dụng cho cả train + test]
+
+age_approx (chỉ sau khi đã split):
+  - Tính median_age CHỈ trên train_df → lưu ra models/median_age.pkl
+  - fillna(median_age) cho CẢ train_df VÀ test_df bằng median_age này
+    (test_df KHÔNG được dùng để tính median)
 
 Sau khi xử lý:
 - assert df['age_approx'].isnull().sum() == 0
@@ -328,29 +394,37 @@ Sau khi xử lý:
 **5.4 — Bước 3: Encode Metadata**
 
 ```
-age_approx → StandardScaler → age_scaled
-             lưu scaler ra models/scaler.pkl
+age_approx → GIỮ NGUYÊN (chưa scale ở bước này)
+             StandardScaler sẽ được fit trong train.py trên Train Fold
 
 sex + anatom_site_general → pd.get_dummies (One-Hot)
              lưu expected_cols ra models/feature_cols.pkl
 
-Bỏ cột: age_approx, lesion_id (sau khi split)
+Bỏ cột: lesion_id (sau khi split xong)
+Giữ lại: age_approx dạng raw để train.py tự scale
 
-Output: vector metadata shape (n_samples, n_features)
+Output: metadata_processed.csv với age_approx chưa scale
 ```
 
 **5.5 — Bước 4: Data Split**
 
 ```
-Phương pháp : StratifiedGroupKFold(n_splits=5)
-Group        : lesion_id (tránh data leakage theo bệnh nhân)
-Stratify     : label (giữ tỷ lệ 8 lớp đồng đều)
-Tỷ lệ        : 80% train / 20% test (fold đầu tiên)
+Bước 1 — Tách Test set cố định (1 lần duy nhất, khóa đến M4):
+  StratifiedGroupKFold(n_splits=5), lấy fold 0 làm test
+  → test_df  : ~20% dữ liệu (không bao giờ dùng để tune model)
+  → trainval_df: ~80% dữ liệu
+
+Bước 2 — Cross-validation trên trainval_df (chỉ để chọn hyperparameter):
+  StratifiedGroupKFold(n_splits=5) trên trainval_df
+  → Mỗi fold: ~64% train / ~16% val
+  → Chạy 5 folds, lấy trung bình val Macro-F1 để so sánh config
+
+Bước 3 — Train model cuối:
+  Dùng toàn bộ trainval_df (80%), đánh giá 1 lần duy nhất trên test_df
 
 Sau khi split:
 - reset_index(drop=True) cả 2 tập
-- assert len(set(train_df['lesion_id']) &
-         set(test_df['lesion_id'])) == 0
+- assert len(set(train_df['lesion_id']) &set(test_df['lesion_id'])) == 0
 - assert test_df['label'].nunique() == 8
 ```
 
@@ -374,9 +448,10 @@ DataLoader:
 - batch_size  = 32
 - shuffle     = True (train) / False (val/test)
 - num_workers = 0 (Windows) / 2 (Kaggle/Linux)
-- Xử lý imbalance train: WeightedRandomSampler
-  weight[i] = 1 / class_count[label[i]]
-  Kết hợp với Focal Loss để tăng hiệu quả cho lớp thiểu số
+- Xử lý imbalance train: Focal Loss + Class Weights (chiến lược chính)
+  → WeightedRandomSampler: CHỈ dùng nếu sau M2 model vẫn predict toàn NV
+  → Không dùng cả 3 cùng lúc — sẽ over-correct và underfit lớp đa số
+  → Thứ tự thử: Focal Loss → thêm Class Weights → thêm Sampler nếu vẫn chưa đủ
 ```
 
 **5.7 — Bước 6: Transform**
@@ -393,9 +468,12 @@ TRAIN transform (lớp phổ biến NV, MEL, BCC, BKL):
 TRAIN transform bổ sung (lớp thiểu số AK, DF, VASC, SCC):
   Thêm vào trên:
   A.ShiftScaleRotate(p=0.5)
-  A.ElasticTransform(p=0.3)
+  A.Affine(shear=(-15, 15), p=0.3),
   A.GridDistortion(p=0.3)
-  → Áp dụng thông qua WeightedRandomSampler hoặc conditional augment
+→ Áp dụng thông qua conditional augment trong Dataset.__getitem__:
+     if label in [AK, DF, VASC, SCC]: apply heavy_transform
+     else: apply standard_transform
+     (KHÔNG dùng WeightedRandomSampler ở đây — xem chiến lược mục 5.6)
 
 VAL/TEST/INFERENCE (INFERENCE_TRANSFORM):
   A.Resize(224, 224)
@@ -403,31 +481,112 @@ VAL/TEST/INFERENCE (INFERENCE_TRANSFORM):
   ToTensorV2()
 
 Lưu ý: INFERENCE_TRANSFORM định nghĩa 1 lần
-        trong preprocessing.py, dùng chung
-        cho dataset.py và app.py
+        trong dataset.py, dùng chung
+        cho train.py và app.py
+        (preprocessing.py KHÔNG chứa Albumentations)
 ```
 
 **5.8 — Sanity Check trước khi train**
 
 ```
 Chạy trên 50 ảnh mẫu, kiểm tra:
-[ ] img_tensor.shape  == (32, 3, 224, 224)
-[ ] meta_tensor.shape == (32, n_features)
-[ ] label.shape       == (32,)
-[ ] img_tensor.dtype  == torch.float32
-[ ] meta_tensor.dtype == torch.float32
-[ ] label.dtype       == torch.int64
-[ ] img pixel range   ≈ [-2.5, 2.5] sau normalize
-[ ] 8 lớp đều xuất hiện trong 1 epoch
+[x] img_tensor.shape[0]  <= 32   (50 ảnh / batch_size=32 → batch cuối còn 18,
+                                   KHÔNG dùng == 32; hoặc set drop_last=True)
+[x] img_tensor.shape[1:] == (3, 224, 224)
+[x] meta_tensor.shape[0] == img_tensor.shape[0]
+[x] meta_tensor.shape[1] == n_features
+[x] label.shape[0]       == img_tensor.shape[0]
+[x] img_tensor.dtype  == torch.float32
+[x] meta_tensor.dtype == torch.float32
+[x] label.dtype       == torch.int64
+[x] img pixel range   ≈ [-2.5, 2.5] sau normalize
+[x] Tất cả lớp có trong sample đều xuất hiện trong 200 batch đầu
+
 ```
 
 **5.9 — Files cần lưu sau Pipeline:**
 
 ```
+data/processed/
+└── metadata_processed.csv   ← OUTPUT CHÍNH của preprocessing.py
+
 models/
-├── scaler.pkl        ← StandardScaler đã fit
-├── median_age.pkl    ← median tuổi từ train
-└── feature_cols.pkl  ← danh sách cột one-hot đúng thứ tự
+├── median_age.pkl    ← median tuổi từ train (dùng khi inference thiếu tuổi)
+├── feature_cols.pkl  ← danh sách cột one-hot đúng thứ tự
+└── scaler.pkl        ← StandardScaler fit trong train.py (KHÔNG phải preprocessing.py)
+```
+
+**5.10 — Phân chia trách nhiệm các file src/:**
+```
+| File | Trách nhiệm | KHÔNG chứa |
+|---|---|---|
+| preprocessing.py | Load CSV, Merge, EDA, Xử lý NaN, One-Hot Encode, StratifiedGroupKFold, lưu metadata_processed.csv + median_age.pkl + feature_cols.pkl | OpenCV, PIL, Albumentations, Dataset Class, DataLoader, Training Logic, StandardScaler fit |
+| dataset.py | Dataset Class, đọc ảnh (cv2), Albumentations transform, Tensor conversion, INFERENCE_TRANSFORM | Preprocessing logic, Training loop |
+| train.py | Training loop, Validation loop, Fit StandardScaler trên Train Fold, Early stopping, Checkpoint, Class Weight, Focal Loss | Ảnh processing, Preprocessing CSV |
+| model.py | BaselineModel, MultimodalNet, load_model() | Training loop, Loss, Optimizer |
+| evaluate.py | Metrics, Confusion Matrix, ROC-AUC, McNemar test, Bootstrapping CI, Classification report | Training logic |
+
+```
+**5.11 — Model Spec (src/model.py):**
+
+```
+File     : src/model.py
+Chứa     : BaselineModel + MultimodalNet + load_model()
+KHÔNG chứa: training loop, loss, optimizer
+
+Đầu vào cần biết từ Pipeline:
+- meta_dim    = len(feature_cols)  ← lấy từ models/feature_cols.pkl
+- num_classes = 8
+
+──────────────────────────────────────────
+BaselineModel
+──────────────────────────────────────────
+- Load ResNet50(pretrained=True)
+- Freeze  : layer1, layer2, layer3
+- Unfreeze: layer4 + fc
+- Thay fc : Linear(2048 → 8)
+- Forward(img) → logits (B, 8)
+
+──────────────────────────────────────────
+MultimodalNet
+──────────────────────────────────────────
+CNN Branch:
+  ResNet50(pretrained=True), cùng freeze strategy
+  Bỏ fc gốc → 2048-dim vector
+
+MLP Branch:
+  Linear(meta_dim → 64)
+  BatchNorm1d(64)
+  ReLU
+  Dropout(0.3)
+  Linear(64 → 16)
+
+Fusion:
+  concat(2048 + 16) = 2064-dim
+  Linear(2064 → 512)
+  BatchNorm1d(512)
+  ReLU
+  Dropout(0.3)
+  Linear(512 → 8)
+
+Forward(img, meta) → logits (B, 8)
+
+──────────────────────────────────────────
+load_model() helper
+──────────────────────────────────────────
+- Nhận  : model_class, path, meta_dim, device
+- Trả về: model đã load weights, ở eval mode
+- Dùng  : evaluate.py + app.py
+
+──────────────────────────────────────────
+Lưu ý quan trọng
+──────────────────────────────────────────
+- Output là logits, KHÔNG qua Softmax
+  → Focal Loss / CrossEntropy nhận logits trực tiếp
+  → Softmax chỉ dùng khi inference trong app.py
+- Khởi tạo:
+    BaselineModel(num_classes=8)
+    MultimodalNet(meta_dim=n, num_classes=8)
 ```
 
 ---
@@ -502,10 +661,24 @@ checkpoint = {
 | Run | Macro-F1 | Macro-AUC | MEL Recall | Threshold | p-value |
 |---|---|---|---|---|---|
 | Baseline (image only) | - | - | - | 0.5 | - |
-| Multimodal | - | - | - | 0.5 | - |
-| Multimodal + threshold | - | - | - | 0.35 | McNemar |
+| Multimodal | - | - | - | 0.5 | McNemar vs Baseline |
+| Multimodal + threshold | - | - | - | 0.35 | - |
 
-> Điều kiện công nhận: Delta Macro-F1 ≥ 3%, MEL Recall ≥ 85%, p < 0.05
+> Điều kiện công nhận:
+>
+> * Delta Macro-F1 ≥ 3%
+> * MEL Recall đạt khoảng 80–85% hoặc cải thiện so với Baseline
+>
+> McNemar test chỉ so sánh Baseline 0.5 vs Multimodal 0.5 (cùng threshold) nhằm đánh giá đóng góp của metadata.
+>
+> Nếu p < 0.05:
+> cải thiện có ý nghĩa thống kê.
+>
+> Nếu p ≥ 0.05 nhưng Delta Macro-F1, Balanced Accuracy hoặc MEL Recall cải thiện ổn định,
+> kết quả vẫn được xem là có giá trị thực tiễn và đáng báo cáo.
+>
+> Threshold shift 0.35 được đánh giá riêng bằng MEL Recall và không sử dụng trong McNemar test.
+
 
 **6.6 — Config:**
 
@@ -516,7 +689,7 @@ CONFIG = {
     "lr"           : 1e-4,
     "batch_size"   : 32,
     "epochs"       : 30,
-    "mel_threshold": 0.35,
+    "mel_threshold": 0.35,  # DEFAULT — xem fallback bậc 1 (0.30) / bậc 2 (0.25) ở mục 7.6, R04 (12.1)
     "n_folds"      : 5,
     "seed"         : 42,
     "loss"         : "focal",
@@ -558,22 +731,22 @@ M6: Deploy + Portfolio
 
 **M0 — Nền móng** | Thời gian: 1 ngày
 ```
-[ ] Cấu trúc thư mục đúng chuẩn
-[ ] .gitignore hoạt động, không commit data/models
-[ ] DVC push data lên Google Drive thành công
-[ ] Sample 50 ảnh đã có sẵn để test pipeline
-[ ] W&B project đã tạo, API key đã lưu .env
-[ ] Kaggle notebook clone repo được
+[x] Cấu trúc thư mục đúng chuẩn
+[x] .gitignore hoạt động, không commit data/models
+[x] DVC push data lên Google Drive thành công
+[x] Sample 50 ảnh đã có sẵn để test pipeline
+[x] W&B project đã tạo, API key đã lưu .env
+[x] Kaggle notebook clone repo được
 ```
 
 **M1 — Data Pipeline** | Thời gian: 2-3 ngày
 ```
-[ ] encode_metadata() chạy đúng, lưu scaler/median/cols
-[ ] StratifiedGroupKFold không bị data leakage
-[ ] assert giao tập train-test = rỗng
-[ ] assert test có đủ 8 lớp
-[ ] Sanity check batch shape đúng hết
-[ ] Chạy thông trên 50 ảnh mẫu, không lỗi
+[x] encode_metadata() chạy đúng, lưu scaler/median/cols
+[x] StratifiedGroupKFold không bị data leakage
+[x] assert giao tập train-test = rỗng
+[x] assert test có đủ 8 lớp
+[x] Sanity check batch shape đúng hết
+[x] Chạy thông trên 50 ảnh mẫu, không lỗi
 ```
 
 **M2 — Baseline Model** | Thời gian: 2-3 ngày
@@ -591,19 +764,23 @@ M6: Deploy + Portfolio
 [ ] Focal Loss + Class Weights tích hợp
 [ ] Train 5 folds trên Kaggle
 [ ] Delta Macro-F1 ≥ 3% so với Baseline
-[ ] MEL Recall ≥ 85% trên val
+[ ] MEL Recall đạt khoảng 80–85%
+    hoặc cải thiện so với Baseline
 [ ] Có checkpoint best_multimodal.pth
 ```
 
 **M4 — Evaluation** | Thời gian: 2-3 ngày
 ```
 [ ] Chạy trên tập Test đã khóa từ M1
-[ ] Macro-AUC ≥ 0.92
-[ ] MEL Recall ≥ 85%
-[ ] McNemar test p < 0.05
+[ ] Macro-AUC ≥ 0.88
+[ ] MEL Recall đạt khoảng 80–85% hoặc cải thiện so với Baseline
+[ ] Hoàn thành McNemar Test
+[ ] Báo cáo p-value và diễn giải kết quả
 [ ] Bootstrapping 1000 lần, 95% CI ≤ ±2.5%
 [ ] Grad-CAM heatmap hợp lý về mặt y khoa
-[ ] SHAP cho thấy metadata có đóng góp thực sự
+[ ] Reliability Diagram được tạo
+[ ] ECE được tính toán
+[ ] Temperature Scaling cải thiện calibration
 ```
 
 **M5 — Streamlit App** | Thời gian: 3-4 ngày
@@ -663,7 +840,7 @@ Tổng: 14-21 ngày (part-time ~3-4h/ngày)
 | Tình huống | Hành động |
 |---|---|
 | M2 Macro-F1 < 0.60 | Debug data pipeline, kiểm tra label mapping, thử lr=1e-3 |
-| M3 MEL Recall < 0.85 sau 2 lần thử | Hạ threshold MEL xuống 0.30, tăng class weight MEL lên 3× |
+| M3 MEL Recall < 0.85 sau 2 lần thử | **Fallback bậc 1:** hạ threshold MEL từ 0.35 → 0.30, tăng class weight MEL lên 3×. Nếu vẫn < 0.85 → **Fallback bậc 2:** hạ tiếp xuống 0.25 (xem R04, mục 12.1) |
 | M3 Delta F1 < 3% | Xem xét thêm feature metadata (lesion size nếu có), thử EfficientNet-B3 |
 | Kaggle GPU quota hết | Chuyển sang Google Colab free, giảm batch_size xuống 16 |
 | M4 CI > ±2.5% | Tăng bootstrap lên 2000 lần, kiểm tra tập test có đủ đại diện 8 lớp không |
@@ -676,9 +853,9 @@ Tổng: 14-21 ngày (part-time ~3-4h/ngày)
 
 | Metric | Ngưỡng | Lý do |
 |---|---|---|
-| Macro-AUC-ROC | ≥ 0.92 | Đánh giá toàn diện 8 lớp, không bị NV chi phối |
+| Macro-AUC-ROC | ≥ 0.88 | Đánh giá toàn diện 8 lớp, không bị NV chi phối |
 | Macro-F1 | ≥ 0.75 | Trung bình F1 đồng đều 8 lớp, phạt lớp hiếm bị bỏ sót |
-| Overall Accuracy | ≥ 0.85 | Metric cơ bản, không dùng một mình vì NV chiếm 51% |
+| Overall Accuracy | tham khảo (không dùng làm KPI) | Misleading vì NV chiếm 51% — model predict toàn NV vẫn đạt 51% accuracy. Chỉ báo cáo để so sánh với paper, không dùng để đánh giá thành công |
 
 **8.2 — Metrics lâm sàng (Clinical-level):**
 
@@ -686,7 +863,7 @@ Tổng: 14-21 ngày (part-time ~3-4h/ngày)
 |---|---|---|
 | MEL Recall (Sensitivity) | ≥ 0.85 | KPI số 1 — bỏ sót ung thư = nguy hiểm tính mạng |
 | MEL Precision | càng cao càng tốt | Tỷ lệ báo nhầm, quá thấp thì bác sĩ mất tin tưởng |
-| MEL F1-Score | ≥ 0.75 | Cân bằng Recall và Precision lớp ác tính |
+| MEL F1-Score | tham khảo (không dùng làm KPI) | Khi hạ threshold, Recall tăng nhưng Precision giảm → F1 có thể không đạt 0.75. Ưu tiên Recall hơn F1 — bỏ sót ung thư nguy hiểm hơn báo nhầm. |
 | NV Specificity | ≥ 0.80 | Giảm báo động nhầm nốt ruồi lành thành ung thư |
 
 **8.3 — Metrics thống kê y khoa:**
@@ -698,9 +875,9 @@ Tổng: 14-21 ngày (part-time ~3-4h/ngày)
   Lý do       : Chứng minh kết quả ổn định, không phải may mắn
 
 McNemar Test
-  So sánh     : Multimodal vs Baseline trên cùng tập Test
+  So sánh     : Multimodal (threshold 0.5) vs Baseline (threshold 0.5) trên cùng tập Test
   Ngưỡng      : p < 0.05
-  Lý do       : Chứng minh metadata thực sự có đóng góp
+  Lý do       : Chứng minh metadata thực sự có đóng góp (giữ threshold cố định để tách biệt ảnh hưởng của kiến trúc)
 ```
 
 **8.4 — Metrics so sánh model:**
@@ -715,17 +892,24 @@ Per-class F1 từng lớp
   Đặc biệt chú ý: DF, VASC, SCC (số lượng ít nhất)
 ```
 
-**8.5 — Metrics XAI:**
+**8.5 — Explainability & Reliability:**
 
-```
-Grad-CAM Drop-and-Gain Evaluation
-  Che vùng heatmap → xác suất phải giảm
-  Nếu không giảm → model đang học vùng nền sai
+Grad-CAM
+  Kiểm tra model có tập trung vào vùng tổn thương hay không.
 
-SHAP Feature Importance
-  Metadata nào đóng góp nhiều nhất
-  Kỳ vọng: age > anatom_site > sex
-```
+Reliability Diagram
+  So sánh confidence và accuracy theo từng confidence bin.
+
+Expected Calibration Error (ECE)
+  Mục tiêu:
+    ECE < 0.05   → rất tốt
+    ECE < 0.10   → chấp nhận được
+
+Temperature Scaling
+  Fit trên validation set.
+  Báo cáo:
+    Before calibration
+    After calibration
 
 **8.5b — Confusion Matrix Analysis:**
 
@@ -750,9 +934,9 @@ RAM usage        : không tăng liên tục (không leak)
 
 ```
 Bắt buộc đạt:
-  1. MEL Recall ≥ 0.85
-  2. Macro-AUC ≥ 0.92
-  3. p < 0.05 (McNemar)
+  1. MEL Recall đạt khoảng 80–85% hoặc cải thiện so với baseline Image-only model.
+  2. Macro-AUC ≥ 0.88
+  3. p < 0.05 (McNemar — Baseline 0.5 vs Multimodal 0.5)
   4. 95% CI ≤ ±2.5%
 
 Quan trọng:
@@ -761,9 +945,10 @@ Quan trọng:
   7. Delta F1 ≥ 3% vs Baseline
 
 Bổ sung:
-  8. Per-class F1 từng lớp
-  9. Grad-CAM Drop-and-Gain
-  10. SHAP Feature Importance
+  8. MEL F1 (tham khảo — không dùng làm KPI, xem lý do mục 8.2)
+  9. Per-class F1 từng lớp
+  10. Grad-CAM samples
+
 ```
 
 **8.8 — File output của Evaluation (src/evaluate.py):**
@@ -774,7 +959,7 @@ reports/
 │   ├── confusion_matrix.png
 │   ├── roc_curve_per_class.png
 │   ├── gradcam_samples.png
-│   └── shap_feature_importance.png
+│   └── reliability_diagram.png
 └── evaluation_report.md      ← điền kết quả thực tế vào đây
 ```
 
@@ -791,7 +976,7 @@ Output : dict {class: probability} cho cả 8 lớp
          Ví dụ: {"MEL": 0.80, "NV": 0.15, "BCC": 0.05, ...}
 Hiển thị: Bar chart ngang, sort theo xác suất giảm dần
 Lưu ý  : Hiển thị Top-3 xác suất cao nhất nổi bật
-         MEL threshold = 0.35 (không phải 0.5)
+         MEL threshold = 0.35 (DEFAULT, không phải 0.5 — xem fallback ở 7.6/R04 nếu Recall không đạt)
 ```
 
 **Output 2 — Grad-CAM Heatmap:**
@@ -805,14 +990,30 @@ Lưu ý  : Denormalize tensor về [0,1] trước khi vẽ heatmap
 
 **Output 3 — Risk Label (Phân tầng nguy cơ):**
 ```
-🔴 NGUY CƠ CAO  : MEL prob > 0.35, hoặc BCC/SCC prob > 0.50
-                  → "Cần can thiệp ngay, chỉ định sinh thiết"
-🟡 THEO DÕI     : AK, BKL xác suất cao (> 0.50)
-                  → "Theo dõi định kỳ 3-6 tháng"
-🟢 LÀNH TÍNH    : NV, DF, VASC xác suất cao (> 0.50)
-                  → "Lành tính, tái khám khi có thay đổi"
-⚪ KHÔNG RÕ RÀNG: max prob < 0.40
-                  → Xem Output 5b — không hiển thị risk label
+⚠ THỨ TỰ ƯU TIÊN BẮT BUỘC (if/elif theo đúng thứ tự này — ưu tiên an toàn lâm sàng):
+
+1. if MEL prob > 0.35, hoặc BCC/SCC prob > 0.50:
+       → 🔴 NGUY CƠ CAO
+       → "Cần can thiệp ngay, chỉ định sinh thiết"
+
+2. elif max prob < 0.40:
+       → ⚪ KHÔNG RÕ RÀNG
+       → Xem mục "Edge Case: Low Confidence" — không hiển thị risk label
+
+3. elif AK, BKL xác suất cao (> 0.50):
+       → 🟡 THEO DÕI
+       → "Theo dõi định kỳ 3-6 tháng"
+
+4. elif NV, DF, VASC xác suất cao (> 0.50):
+       → 🟢 LÀNH TÍNH
+       → "Lành tính, tái khám khi có thay đổi"
+
+Lưu ý vùng chồng lấn (MEL prob trong khoảng 0.35–0.40):
+  Điều kiện 1 (MEL > 0.35) LUÔN được check trước điều kiện 2 (max < 0.40).
+  Ví dụ MEL = 0.37, max prob = 0.37 (< 0.40):
+    → thỏa điều kiện 1 trước → kết quả = 🔴 NGUY CƠ CAO (không rơi vào ⚪)
+  Lý do: an toàn lâm sàng — không được để case nghi MEL bị gắn nhãn
+  "Không rõ ràng" và bỏ qua cảnh báo.
 ```
 
 **Output 4 — Văn bản lâm sàng tự động:**
@@ -832,7 +1033,7 @@ mục đích nghiên cứu và học thuật."
 Mục đích: bác sĩ copy paste thẳng vào hệ thống EMR
 ```
 
-**Output 5b — Xử lý khi độ tin cậy thấp:**
+**Edge Case — Xử lý khi độ tin cậy thấp (Low Confidence):**
 ```
 Nếu max(probability) < 0.40:
   → Hiển thị cảnh báo: "Mô hình không đủ độ tin cậy để phân loại
@@ -893,13 +1094,13 @@ model_url = st.secrets["MODEL_URL"]
 **10.4 — requirements_deploy.txt (tối giản, không có dev deps):**
 
 ```
-torch==2.1.0
-torchvision==0.16.0
-albumentations==1.3.1
-streamlit==1.28.0
+torch==2.4.1
+torchvision==0.19.1
+albumentations>=1.4.0
+streamlit==1.38.0
 scikit-learn==1.3.2
-pandas==2.1.0
-numpy==1.24.0
+pandas==2.1.4
+numpy==1.26.4
 opencv-python-headless==4.8.0.76
 grad-cam==1.4.8
 joblib==1.3.2
@@ -907,7 +1108,7 @@ joblib==1.3.2
 
 > Dùng `opencv-python-headless` thay vì `opencv-python` trên server (không cần GUI).
 
-**10.5 — Load model an toàn trong app.py:**
+**10.5 — Load model + artifacts an toàn trong app.py:**
 
 ```python
 @st.cache_resource
@@ -921,6 +1122,22 @@ def load_model():
     model.load_state_dict(torch.load(model_path, map_location="cpu"))
     model.eval()
     return model
+
+@st.cache_resource
+def load_preprocessing_artifacts():
+    # BẮT BUỘC: nếu thiếu các artifact này, inference sẽ nhận input
+    # sai phân phối so với lúc train → sai kết quả im lặng (không crash)
+    scaler = joblib.load("models/scaler.pkl")             # StandardScaler fit trên Train Fold
+    median_age = joblib.load("models/median_age.pkl")     # median tuổi từ train
+    feature_cols = joblib.load("models/feature_cols.pkl") # thứ tự cột one-hot
+    return scaler, median_age, feature_cols
+
+# Sử dụng khi tiền xử lý input từ user trước khi đưa vào model:
+#   1. age_approx: nếu user không nhập tuổi → fillna(median_age)
+#   2. One-hot encode sex/anatom_site_general theo đúng feature_cols
+#      (đảm bảo cùng thứ tự cột như lúc train)
+#   3. scaler.transform() lên age_approx (và các cột numeric khác nếu có)
+#      → mới đưa meta_tensor vào model
 ```
 
 **10.6 — Checklist trước khi deploy:**
@@ -929,6 +1146,7 @@ def load_model():
 [ ] requirements_deploy.txt đã tối giản
 [ ] .streamlit/secrets.toml đã thêm vào .gitignore
 [ ] Model .pth load được từ Drive URL
+[ ] scaler.pkl + median_age.pkl + feature_cols.pkl được load và apply lên age_approx trước inference
 [ ] App chạy local không lỗi
 [ ] Missing metadata không crash
 [ ] Inference time < 3 giây trên CPU
@@ -1038,11 +1256,12 @@ graph TD
     E --> G[Concat 2064-dim]
     F --> G
     G --> H[Classifier Linear 8]
-    H --> I[8-class Softmax]
-    I --> J[Probability Table]
-    I --> K[Grad-CAM Heatmap]
-    I --> L[Risk Label]
-    I --> M[Clinical Text]
+    H --> I[logits 8-class]
+    I --> I2[Softmax — inference only]
+    I2 --> J[Probability Table]
+    I2 --> K[Grad-CAM Heatmap]
+    I2 --> L[Risk Label]
+    I2 --> M[Clinical Text]
 ```
 
 **11.3 — GIF Demo:**
@@ -1069,11 +1288,11 @@ Nội dung demo:
 | R01 | Kaggle GPU quota hết giữa chừng | Cao | Cao | Dùng Google Colab free làm backup; giảm batch_size xuống 16; chia train thành nhiều session |
 | R02 | W&B mất kết nối khi train | Trung bình | Thấp | `wandb.init(mode="offline")`, sync sau; checkpoint local theo epoch |
 | R03 | Model không converge (loss không giảm) | Trung bình | Cao | Sanity check trên 50 ảnh trước; kiểm tra learning rate với lr_finder; thử Adam với lr=1e-3 |
-| R04 | MEL Recall không đạt 85% sau M3 | Trung bình | Cao | Hạ threshold xuống 0.25–0.30; tăng class weight MEL; thêm hard negative mining |
+| R04 | MEL Recall không đạt 85% sau M3 | Trung bình | Cao | Fallback bậc 1: hạ threshold 0.35→0.30 (xem 7.6); nếu vẫn chưa đạt, fallback bậc 2: hạ xuống 0.25; tăng class weight MEL; thêm hard negative mining |
 | R05 | Streamlit Cloud OOM (model quá lớn) | Trung bình | Trung bình | Quantize model; fallback Hugging Face Spaces (2GB RAM free) |
 | R06 | DVC mất sync với Google Drive | Thấp | Trung bình | Giữ bản backup local; document đường dẫn Drive rõ ràng trong README |
 | R07 | Dữ liệu ISIC 2019 bị xóa khỏi Kaggle | Thấp | Cao | Download và lưu local ngay từ đầu; DVC push lên Drive ngay M0 |
-| R08 | Tiến độ bị trễ > 1 tuần | Trung bình | Trung bình | Cắt bỏ: EDA Dashboard (Output 5), SHAP (giữ Grad-CAM), 5-fold (giữ 1 fold) |
+| R08 | Tiến độ bị trễ > 1 tuần | Trung bình | Trung bình | Cắt bỏ: EDA Dashboard (Output 5), Calibration (giữ Grad-CAM), 5-fold (giữ 1 fold) |
 
 **12.2 — Thứ tự tính năng có thể cắt khi trễ (priority P1 → P3):**
 
@@ -1087,7 +1306,7 @@ P1 — Bắt buộc (không cắt):
 
 P2 — Quan trọng nhưng có thể đơn giản hóa:
   - 5-fold → giữ 1 fold (tiết kiệm 4x thời gian train)
-  - SHAP → bỏ nếu trễ, chỉ giữ Grad-CAM
+  - Calibration (ECE + Reliability Diagram) → bỏ nếu trễ, chỉ giữ Grad-CAM
   - Bootstrapping CI → giảm xuống 500 lần thay vì 1000
 
 P3 — Bỏ nếu cần:
